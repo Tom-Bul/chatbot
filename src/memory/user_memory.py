@@ -4,7 +4,8 @@ import ollama
 from datetime import datetime
 from colorama import Fore, Style
 from src.config import system_messages as msgs
-from src.utils.thinking_indicator import ThinkingIndicator
+from src.utils.thinking_indicator import ThinkingIndicator, thinking_context
+from src.utils.model_manager import ModelManager
 
 class UserMemory:
     def __init__(self):
@@ -55,29 +56,23 @@ class UserMemory:
 
     def _analyze_for_memory(self, content):
         try:
-            thinking = ThinkingIndicator()
-            thinking.start("Analyzing message")
-            
-            current_memory = json.dumps(self.memory, indent=2)
-            messages = [
-                {'role': 'system', 'content': msgs.MEMORY_ANALYZER_PROMPT},
-                {'role': 'user', 'content': (
-                    f"Previous memory:\n{current_memory}\n\n"
-                    f"New message from user:\n{content}\n\n"
-                    "Extract any new personal information, interests, or preferences. "
-                    "Return ONLY a JSON object with new information."
-                )}
-            ]
-            response = ollama.chat(
-                model='llama3.2:3b',
-                messages=messages
-            )
-            
-            thinking.stop()
+            with thinking_context("Analyzing message"):
+                current_memory = json.dumps(self.memory, indent=2)
+                messages = [
+                    {'role': 'system', 'content': msgs.MEMORY_ANALYZER_PROMPT},
+                    {'role': 'user', 'content': (
+                        f"Previous memory:\n{current_memory}\n\n"
+                        f"New message from user:\n{content}\n\n"
+                        "Extract any new personal information, interests, or preferences. "
+                        "Return ONLY a JSON object with new information."
+                    )}
+                ]
+                response = ModelManager.chat(
+                    messages=messages,
+                    model='llama3.2:3b'
+                )
             return response['message']['content']
-            
         except Exception as e:
-            thinking.stop()
             print(f'{Fore.RED}[Memory analysis error: {str(e)}]{Style.RESET_ALL}')
             return None
 

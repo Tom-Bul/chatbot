@@ -1,6 +1,7 @@
 import time
 import threading
 from src.utils.colors import Colors
+from contextlib import contextmanager
 
 class ThinkingIndicator:
     def __init__(self, message=""):
@@ -27,12 +28,25 @@ class ThinkingIndicator:
             if not self.running:
                 self.running = True
                 self.thread = threading.Thread(target=self._animate)
-                self.thread.daemon = True  # Make thread daemon so it exits with main program
+                self.thread.daemon = True  # Daemon thread exits with main program
                 self.thread.start()
 
     def stop(self):
         with self._lock:
             self.running = False
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=1.0)  # Wait max 1 second for thread to finish
-        print('\r' + ' ' * (len(self.message) + 2), end='\r')  # Clear the line 
+            self.thread.join(timeout=1.0)
+        print('\r' + ' ' * (len(self.message) + 2), end='\r')
+
+@contextmanager
+def thinking_context(message):
+    indicator = ThinkingIndicator(message)
+    indicator.start()
+    try:
+        yield indicator
+    finally:
+        indicator.stop()
+
+# Usage:
+# with thinking_context("Checking if search needed"):
+#     ... do work that needs a spinner ... 

@@ -15,13 +15,16 @@ class ModelManager:
             options = {}
             if timeout:
                 options['timeout'] = timeout
-                
-            return ollama.chat(
+            response = ollama.chat(
                 model=model,
                 messages=messages,
                 stream=stream,
                 options=options
             )
+            if stream:
+                return response  # Return the stream directly for the caller to process
+            return response
         except Exception as e:
             Colors.print(f"Chat error: {str(e)}", Colors.ERROR)
+            # Consider invoking a centralized error handler here
             return None 

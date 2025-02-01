@@ -8,8 +8,9 @@ from src.search.scraper import WebScraper
 from src.search.search_engine import SearchEngine
 from src.config import system_messages as msgs
 from src.memory.user_memory import UserMemory
-from src.utils.thinking_indicator import ThinkingIndicator
+from src.utils.thinking_indicator import ThinkingIndicator, thinking_context
 from src.utils.colors import Colors
+from src.utils.model_manager import ModelManager  # New import for centralized chat calls
 
 class Assistant:
     def __init__(self):
@@ -35,17 +36,18 @@ class Assistant:
                 continue
 
     def process_input(self, prompt):
+        # Check for fast mode and update accordingly
         if prompt.strip().endswith('-fast'):
             self.fast_mode = True
             prompt = prompt[:-5].strip()
-            print(f'{Fore.CYAN}[Fast mode enabled]{" "*5}{Style.RESET_ALL}')
+            print(f'{Fore.CYAN}[Fast mode enabled]{" " * 5}{Style.RESET_ALL}')
         else:
             self.fast_mode = False
-            
+
         # Update memory with user input
         self.memory.update_memory(prompt)
         
-        # Add relevant memory to conversation context
+        # Append memory context if available, else add the user prompt directly
         memory_context = self.memory.get_relevant_memory(prompt)
         if memory_context:
             memory_prompt = (
@@ -56,7 +58,7 @@ class Assistant:
         else:
             self.conversation.append({'role': 'user', 'content': prompt})
 
-        # Check if search is needed
+        # Check if search is needed using a context manager for the spinner
         if self._should_search(self.conversation[-1]):
             context = self._perform_search(self.conversation)
             self.conversation = self.conversation[:-1]
@@ -68,18 +70,28 @@ class Assistant:
             
             self.conversation.append({'role': 'user', 'content': prompt})
 
-        # Get assistant response
+        # Get assistant response using the centralized ModelManager.chat
         print(f'{Fore.CYAN}[Assistant responding]{" "*5}{Style.RESET_ALL}')
-        model = 'llama3.2:3b' if self.fast_mode else 'deepseek-r1:7b'
-        response_stream = ollama.chat(
-            model=model,
+        model = ModelManager.get_model(self.fast_mode)
+        response_stream = ModelManager.chat(
             messages=self.conversation,
+            model=model,
             stream=True
         )
+        if response_stream is None:
+            Colors.print("Failed to get response from model", Colors.ERROR)
+            return self.conversation
+
         complete_response = ''
-        for chunk in response_stream:
-            print(f'{Fore.YELLOW}{chunk["message"]["content"]}{Style.RESET_ALL}', end='', flush=True)
-            complete_response += chunk["message"]["content"]
+        try:
+            for chunk in response_stream:
+                if chunk and 'message' in chunk and 'content' in chunk['message']:
+                    content = chunk['message']['content']
+                    print(f'{Fore.YELLOW}{content}{Style.RESET_ALL}', end='', flush=True)
+                    complete_response += content
+        except Exception as e:
+            Colors.print(f"Error processing response stream: {str(e)}", Colors.ERROR)
+            return self.conversation
         
         self.conversation.append({'role': 'assistant', 'content': complete_response})
         print('\n')
@@ -90,26 +102,22 @@ class Assistant:
         return self.conversation
 
     def _should_search(self, message):
-        thinking = None
+        # Use thinking_context to automatically start/stop the indicator
         try:
-            thinking = ThinkingIndicator()
-            thinking.start("Checking if search needed")
-            response = ollama.chat(
-                model='llama3.2:3b',
-                messages=[
-                    {'role': 'system', 'content': msgs.search_or_not_msg},
-                    message
-                ]
-            )
+            with thinking_context("Checking if search needed"):
+                response = ModelManager.chat(
+                    messages=[
+                        {'role': 'system', 'content': msgs.search_or_not_msg},
+                        message
+                    ],
+                    model='llama3.2:3b'
+                )
             content = response['message']['content']
             Colors.print(f"Search needed: {content}", Colors.SUCCESS)
             return 'true' in content.lower()
         except Exception as e:
             Colors.print(f"Error checking search need: {str(e)}", Colors.ERROR)
             return False
-        finally:
-            if thinking:
-                thinking.stop()
 
     def _perform_search(self, convo):
         print(f'{Fore.CYAN}[Starting search process]{" "*5}{Style.RESET_ALL}')
@@ -155,17 +163,15 @@ class Assistant:
         if len(content) < 200:  # Basic length check
             return False
         
-        needed_prompt = f'PAGE_TEXT: {content[:5000]} \nUSER_PROMPT: {convo[-1]["content"]} \nSEARCH_QUERY: {query}'  # Limit content length
+        needed_prompt = f'PAGE_TEXT: {content[:5000]} \nUSER_PROMPT: {convo[-1]["content"]} \nSEARCH_QUERY: {query}'
         try:
-            response = ollama.chat(
-                model='llama3.2:3b',
+            response = ModelManager.chat(
                 messages=[
                     {'role': 'system', 'content': msgs.contains_data_msg},
                     {'role': 'user', 'content': needed_prompt}
                 ],
-                options={
-                    'timeout': 15  # 15 second timeout
-                }
+                model='llama3.2:3b',
+                timeout=15
             )
             result = 'true' in response['message']['content'].lower()
             print(f'{Fore.GREEN}[Content validation: {result}]{Style.RESET_ALL}')
@@ -175,32 +181,27 @@ class Assistant:
             return False
 
     def _get_best_result(self, results, query, convo):
-        thinking = ThinkingIndicator()
-        thinking.start("Selecting best result")
-        
-        best_msg = f'SEARCH_RESULTS: {results} \nUSER_PROMPT: {convo[-1]["content"]} \nSEARCH_QUERY: {query}'
-
-        for attempt in range(2):
-            try:
-                response = ollama.chat(
-                    model='llama3.2:3b',
-                    messages=[
-                        {'role': 'system', 'content': msgs.best_search_msg},
-                        {'role': 'user', 'content': best_msg}
-                    ]
-                )
-                result = response['message']['content'].strip()
-                if result.isdigit() and 0 <= int(result) < len(results):
-                    thinking.stop()
-                    print(f'{Fore.GREEN}[Selected result {result}]{Style.RESET_ALL}')
-                    return int(result)
-                else:
-                    print(f'{Fore.RED}[Invalid result: not a valid index]{Style.RESET_ALL}')
-            except Exception as e:
-                print(f'{Fore.RED}[Error: invalid response format]{Style.RESET_ALL}')
-                continue
-        
-        thinking.stop()
+        # Use thinking_context to wrap the selection process
+        with thinking_context("Selecting best result"):
+            best_msg = f'SEARCH_RESULTS: {results} \nUSER PROMPT: {convo[-1]["content"]} \nSEARCH_QUERY: {query}'
+            for attempt in range(2):
+                try:
+                    response = ModelManager.chat(
+                        messages=[
+                            {'role': 'system', 'content': msgs.best_search_msg},
+                            {'role': 'user', 'content': best_msg}
+                        ],
+                        model='llama3.2:3b'
+                    )
+                    result = response['message']['content'].strip()
+                    if result.isdigit() and 0 <= int(result) < len(results):
+                        print(f'{Fore.GREEN}[Selected result {result}]{Style.RESET_ALL}')
+                        return int(result)
+                    else:
+                        print(f'{Fore.RED}[Invalid result: not a valid index]{Style.RESET_ALL}')
+                except Exception as e:
+                    print(f'{Fore.RED}[Error: invalid response format]{Style.RESET_ALL}')
+                    continue
         print(f'{Fore.RED}[Failed to select result]{Style.RESET_ALL}')
         return None
 
@@ -213,21 +214,17 @@ class Assistant:
         )
 
     def _get_agent_response(self, system_msg, context, model='deepseek-r1:7b', color=Fore.YELLOW):
+        # Use thinking_context to ensure the indicator stops even on errors
         try:
-            thinking = ThinkingIndicator()
-            thinking.start("Processing response")
-            
-            response_stream = ollama.chat(
-                model=model,
-                messages=[
-                    {'role': 'system', 'content': system_msg},
-                    *context
-                ],
-                stream=True
-            )
-            
-            thinking.stop()
-            
+            with thinking_context("Processing response"):
+                response_stream = ModelManager.chat(
+                    messages=[
+                        {'role': 'system', 'content': system_msg},
+                        *context
+                    ],
+                    model=model,
+                    stream=True
+                )
             complete_response = ''
             for chunk in response_stream:
                 print(f'{color}{chunk["message"]["content"]}{Style.RESET_ALL}', end='', flush=True)
@@ -236,7 +233,6 @@ class Assistant:
             return complete_response
             
         except Exception as e:
-            thinking.stop()
             print(f'{Fore.RED}[Error: {str(e)}]{Style.RESET_ALL}')
             return None
 

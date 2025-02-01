@@ -30,7 +30,7 @@ class DebateController:
     def run_debate(self, convo, fast_mode=False):
         # Skip debate if the last message is too short or just a greeting
         last_message = convo[-1]['content']
-        if len(last_message.split()) < 30 in last_message.lower():
+        if len(last_message.split()) < 30:
             return convo
         
         Colors.print("Starting debate", Colors.SYSTEM)

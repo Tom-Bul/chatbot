@@ -1,0 +1,5 @@
+ollama==0.4.7
+beautifulsoup4==4.12.3
+colorama==0.4.6
+requests==2.31.0
+soupsieve==2.5
